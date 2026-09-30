@@ -221,12 +221,19 @@ def check_for_updates(auto_install: bool) -> bool:
         log("Update check skipped: set GITHUB_REPOSITORY in the app before building.")
         return False
 
+    log("Checked for updates.")
     api_url = GITHUB_RELEASES_API.format(repository=repository)
     request = Request(api_url, headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
     try:
         with urlopen(request, timeout=20) as response:
             release = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except HTTPError as exc:
+        if exc.code == 404:
+            log("No updates are required: no GitHub release has been published yet.")
+            return False
+        log(f"Update check failed: {exc}")
+        return False
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
         log(f"Update check failed: {exc}")
         return False
 
@@ -235,11 +242,11 @@ def check_for_updates(auto_install: bool) -> bool:
         log("Update check failed: GitHub release has no version tag.")
         return False
     if not is_newer_version(latest_version, APP_VERSION):
-        log(f"App is up to date ({APP_VERSION}).")
+        log(f"No updates are required. Current version: {APP_VERSION}. Latest version: {latest_version}.")
         return False
 
     release_page = GITHUB_RELEASES_PAGE.format(repository=repository)
-    log(f"Update available: {APP_VERSION} -> {latest_version}")
+    log(f"Update is available: {APP_VERSION} -> {latest_version}")
 
     if not auto_install:
         log(f"Download it here: {release_page}")
