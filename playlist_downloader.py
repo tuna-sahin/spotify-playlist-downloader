@@ -59,7 +59,7 @@ SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
 APP_NAME = "spotify playlist downloader - Tuna"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.2"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repository}/releases/latest"
@@ -189,7 +189,6 @@ for ($i = 0; $i -lt 30; $i++) {{
         if (Test-Path -LiteralPath $backup) {{ Remove-Item -LiteralPath $backup -Force }}
         Move-Item -LiteralPath $target -Destination $backup -Force
         Move-Item -LiteralPath $source -Destination $target -Force
-        Start-Process -FilePath $target
         if (Test-Path -LiteralPath $backup) {{ Remove-Item -LiteralPath $backup -Force }}
         break
     }}
@@ -274,7 +273,8 @@ def check_for_updates(auto_install: bool) -> bool:
         log(f"Latest release: {release_page}")
         return False
 
-    log("Update downloaded. The app will restart to finish installing it.")
+    log("Update downloaded. The app will close so the update can finish.")
+    log("Open the app again in a few seconds.")
     return True
 
 
@@ -1787,7 +1787,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_update_check:
         update_started = check_for_updates(auto_install=True)
         if update_started and getattr(sys, "frozen", False):
-            return 0
+            return 20
 
     if interactive:
         prompt_for_missing_inputs(args)
@@ -1990,9 +1990,9 @@ if __name__ == "__main__":
     interactive_mode = len(sys.argv) == 1
     try:
         exit_code = main()
-        if interactive_mode:
+        if interactive_mode and exit_code != 20:
             input("\nPress Enter to close...")
-        sys.exit(exit_code)
+        sys.exit(0 if exit_code == 20 else exit_code)
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
         if interactive_mode:
