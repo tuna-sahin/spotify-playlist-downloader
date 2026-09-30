@@ -58,7 +58,7 @@ SPOTIFY_QUERY_PLAYLIST_OPERATION = "queryPlaylist"
 SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
-APP_NAME = "spotify playlist downloader - tuna"
+APP_NAME = "spotify playlist downloader - Tuna"
 APP_VERSION = "1.1.0"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
