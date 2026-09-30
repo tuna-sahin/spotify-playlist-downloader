@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+downloads/
+*.spec
+spotify_credentials
+spotify_credentials.txt
+spotify_credentials.json
+spotify_credentials.env
