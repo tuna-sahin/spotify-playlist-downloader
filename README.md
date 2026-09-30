@@ -44,7 +44,7 @@ dist\Spotify Playlist Downloader.exe
 They can double-click it, paste a Spotify playlist URL, then press Enter for the output folder prompt to save next to the `.exe`. On launch it prints:
 
 ```text
-spotify playlist downloader - Tuna
+spotify playlist downloader --- Tuna
 ```
 
 The downloader now tries a close alternative YouTube result when the first selected song fails. If that second attempt also fails, the track is reported as failed.
