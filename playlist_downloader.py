@@ -11,6 +11,8 @@ import argparse
 import base64
 import concurrent.futures
 import dataclasses
+from difflib import SequenceMatcher
+from functools import lru_cache
 import hashlib
 import html
 import io
@@ -67,7 +69,7 @@ SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
 APP_NAME = "spotify playlist downloader --- Tuna"
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repository}/releases/latest"
@@ -120,6 +122,7 @@ TITLE_NOISE = re.compile(
 )
 SAFE_CHARS = f"-_.() {string.ascii_letters}{string.digits}"
 PRINT_LOCK = threading.Lock()
+ARTWORK_LOCK = threading.Lock()
 
 
 def app_base_dir() -> Path:
@@ -872,7 +875,7 @@ def track_from_embed_item(item: dict[str, Any], index: int) -> Track | None:
         artists=artists,
         album="",
         duration_seconds=round(duration_ms / 1000),
-        artwork_url=spotify_image_url(item.get("imageUri", "") or item.get("images", [])),
+        artwork_url=spotify_image_url(item.get("images", [])) or spotify_image_url(item.get("imageUri", "")),
     )
 
 
@@ -1572,6 +1575,68 @@ def entry_to_candidate(entry: dict[str, Any], track: Track) -> Candidate:
     )
 
 
+def similarity_text(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value.casefold().replace("ı", "i"))
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return " ".join(re.findall(r"[^\W_]+", value, flags=re.UNICODE))
+
+
+def name_similarity(expected: str, actual: str) -> float:
+    """Compare whole token windows so artist prefixes and video suffixes are harmless."""
+    target = similarity_text(expected)
+    words = similarity_text(actual).split()
+    if not target or not words:
+        return 0.0
+    count = len(target.split())
+    best = 0.0
+    for size in range(max(1, count - 1), min(len(words), count + 1) + 1):
+        for start in range(len(words) - size + 1):
+            window = " ".join(words[start:start + size])
+            best = max(best, SequenceMatcher(None, target, window, autojunk=False).ratio())
+    return best
+
+
+ACOUSTIC_WORDS = re.compile(r"\b(?:acoustic|accoustic|acoustics|akustik|akustisch|acoustique|acustico|acustica)\b")
+
+
+def is_acoustic_title(title: str) -> bool:
+    return bool(ACOUSTIC_WORDS.search(similarity_text(title)))
+
+
+def candidate_name_similarity(entry: dict[str, Any], track: Track) -> tuple[float, float]:
+    title = entry.get("title") or ""
+    channel = entry.get("channel") or entry.get("uploader") or ""
+    title_similarity = max(name_similarity(track.title, title), name_similarity(simplified_title(track.title), title))
+    base_title = ACOUSTIC_WORDS.sub(" ", similarity_text(simplified_title(track.title)))
+    base_title = re.sub(r"\bversion\b", " ", base_title).strip()
+    if is_acoustic_title(track.title) and base_title:
+        title_similarity = max(title_similarity, name_similarity(base_title, title))
+    # Match the primary artist independently; a matching song title alone is insufficient.
+    artist_similarity = max(name_similarity(track.artists[0], title), name_similarity(track.artists[0], channel))
+    return title_similarity, artist_similarity
+
+
+def rank_youtube_entries(entries: list[dict[str, Any]], track: Track, max_results: int) -> list[Candidate]:
+    matches = []
+    for entry in entries:
+        title_similarity, artist_similarity = candidate_name_similarity(entry, track)
+        if title_similarity >= 0.72 and artist_similarity >= 0.82:
+            matches.append((entry, (title_similarity * artist_similarity) ** 0.5))
+    if matches:
+        # Among name matches, prefer the recording type requested by Spotify.
+        acoustic_requested = is_acoustic_title(track.title)
+        matches.sort(key=lambda match: (
+            is_acoustic_title(match[0].get("title") or "") == acoustic_requested,
+            match[1], score_candidate(match[0], track),
+        ), reverse=True)
+        return [entry_to_candidate(entry, track) for entry, _ in matches[:max_results]]
+
+    ranked = sorted(entries, key=lambda entry: score_candidate(entry, track), reverse=True)
+    candidates = [entry_to_candidate(entry, track) for entry in ranked[:max_results]]
+    best_score = candidates[0].score
+    return [candidate for candidate in candidates if candidate.score >= best_score - 30]
+
+
 def search_youtube_candidates(track: Track, max_results: int) -> list[Candidate]:
     ydl_opts = {
         "quiet": True,
@@ -1581,7 +1646,8 @@ def search_youtube_candidates(track: Track, max_results: int) -> list[Candidate]
     }
 
     entries_by_id: dict[str, dict[str, Any]] = {}
-    per_query = max(3, min(max_results, 8))
+    max_results = max(1, max_results)
+    per_query = max_results
     with YoutubeDL(ydl_opts) as ydl:
         for query in youtube_queries(track):
             result = ydl.extract_info(f"ytsearch{per_query}:{query}", download=False)
@@ -1596,17 +1662,7 @@ def search_youtube_candidates(track: Track, max_results: int) -> list[Candidate]
     if not entries:
         raise RuntimeError("no YouTube results")
 
-    ranked = sorted(
-        entries,
-        key=lambda entry: score_candidate(entry, track),
-        reverse=True,
-    )
-    candidates = [entry_to_candidate(entry, track) for entry in ranked[:max_results]]
-    best_score = candidates[0].score
-    close_candidates = [
-        candidate for candidate in candidates if candidate.score >= best_score - 30
-    ]
-    return close_candidates or candidates[:1]
+    return rank_youtube_entries(entries, track, max_results)
 
 
 def search_youtube(track: Track, max_results: int) -> Candidate:
@@ -1637,6 +1693,37 @@ def prepare_cover(data: bytes) -> bytes:
     raise ValueError("Could not compress album artwork below 100,000 bytes.")
 
 
+def artwork_source_urls(url: str) -> list[str]:
+    # Known album-cover CDN variants: 64/300px thumbnails and the 640px cover.
+    larger = re.sub(
+        r"^(https://i\.scdn\.co/image/ab67616d)(?:00004851|00001e02)([0-9a-f]{24})$",
+        r"\g<1>0000b273\2", url,
+    )
+    return list(dict.fromkeys([larger, url]))
+
+
+@lru_cache(maxsize=128)
+def cached_album_cover(url: str) -> bytes:
+    sources = artwork_source_urls(url)
+    for index, source in enumerate(sources):
+        response = requests.get(source, timeout=30)
+        if response.status_code in (403, 404) and index + 1 < len(sources):
+            continue
+        # A 429 is an error, never a signal to request a smaller image.
+        response.raise_for_status()
+        with Image.open(io.BytesIO(response.content)) as image:
+            if min(image.size) < 500:
+                log(f"Album artwork source is only {image.width}x{image.height}; enlarging to 500x500.")
+        return prepare_cover(response.content)
+    raise RuntimeError("No Spotify album cover was available.")
+
+
+def fetch_album_cover(url: str) -> bytes:
+    # Serialize cache misses so simultaneous songs from one album share a request.
+    with ARTWORK_LOCK:
+        return cached_album_cover(url)
+
+
 def write_mp3_tags(path: Path, track: Track, include_album_art: bool, ascii_names: bool) -> None:
     try:
         tags = ID3(path)
@@ -1651,9 +1738,7 @@ def write_mp3_tags(path: Path, track: Track, include_album_art: bool, ascii_name
     tags.delall("APIC")
     if include_album_art and track.artwork_url:
         try:
-            response = requests.get(track.artwork_url, timeout=30)
-            response.raise_for_status()
-            tags.add(APIC(encoding=1, mime="image/jpeg", type=3, desc="Front Cover", data=prepare_cover(response.content)))
+            tags.add(APIC(encoding=1, mime="image/jpeg", type=3, desc="Front Cover", data=fetch_album_cover(track.artwork_url)))
         except Exception as exc:
             log(f"{track.index}. Skipping unavailable album artwork: {exc}")
     tags.update_to_v23()

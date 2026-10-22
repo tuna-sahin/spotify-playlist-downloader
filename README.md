@@ -2,6 +2,15 @@
 
 Downloads a Spotify playlist in order by searching YouTube, preferring lyric/audio/topic-style videos, matching durations closely, and saving numbered MP3 files with leading zeros.
 
+YouTube matching first compares both the song title and primary artist, tolerating small
+spelling differences, accents, punctuation, and video-title extras. All results from the
+search variants are checked, up to `--max-results` per query (default 12). Results meeting
+both name thresholds are ranked by similarity, with the existing audio/duration preferences
+breaking ties. If none qualifies, the previous scoring algorithm chooses the fallback.
+Among name matches, acoustic versions are preferred only when the Spotify title marks
+the song as acoustic (including `accoustic` and `akustik`); otherwise normal versions
+are preferred. The other recording type remains available if no preferred match exists.
+
 Use this only for audio that you own, have permission to download, or is otherwise lawful to download in your location.
 
 ## Setup
@@ -181,5 +190,8 @@ Songs are saved beneath the selected output directory in a folder named after th
 Artwork is a 500 × 500 RGB baseline JPEG under 100,000 bytes, embedded as Front Cover
 (APIC type 3, `image/jpeg`). Tags use ID3v2.3 with UTF-16 text. Updating tags preserves
 the MP3 audio bytes; the existing YouTube-to-MP3 conversion still happens when needed.
+The downloader prefers large Spotify artwork sources, tries the known 640px CDN variant
+for thumbnail URLs, and caches prepared covers for up to 128 source URLs. If only a small
+image is available, a warning reports its original dimensions before enlarging it.
 Install the updated dependencies with `python -m pip install -r requirements.txt`.
 Rebuild the executable to include these changes when using the packaged application.

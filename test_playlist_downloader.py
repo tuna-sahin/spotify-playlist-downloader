@@ -9,6 +9,86 @@ from mutagen.id3 import ID3
 import playlist_downloader as p
 
 class DownloaderTests(unittest.TestCase):
+    def setUp(self):
+        p.cached_album_cover.cache_clear()
+
+    def test_cover_upgrades_thumbnail_and_caches_album(self):
+        buffer = io.BytesIO()
+        Image.new('RGB', (640, 640), 'red').save(buffer, 'JPEG')
+        url = 'https://i.scdn.co/image/ab67616d00001e02ff9ca10b55ce82ae553c8228'
+        response = Mock(status_code=200, content=buffer.getvalue())
+        with patch.object(p.requests, 'get', return_value=response) as get:
+            first = p.fetch_album_cover(url)
+            self.assertEqual(p.fetch_album_cover(url), first)
+        get.assert_called_once_with(url.replace('00001e02', '0000b273'), timeout=30)
+
+    def test_cover_missing_large_variant_falls_back(self):
+        buffer = io.BytesIO()
+        Image.new('RGB', (300, 300), 'blue').save(buffer, 'JPEG')
+        url = 'https://i.scdn.co/image/ab67616d00001e02ff9ca10b55ce82ae553c8228'
+        with patch.object(p.requests, 'get', side_effect=[Mock(status_code=404), Mock(status_code=200, content=buffer.getvalue())]) as get:
+            p.fetch_album_cover(url)
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(get.call_args.args[0], url)
+
+    def test_cover_rate_limit_does_not_request_smaller_image(self):
+        url = 'https://i.scdn.co/image/ab67616d00001e02ff9ca10b55ce82ae553c8228'
+        response = Mock(status_code=429)
+        response.raise_for_status.side_effect = RuntimeError('429 Too Many Requests')
+        with patch.object(p.requests, 'get', return_value=response) as get:
+            with self.assertRaisesRegex(RuntimeError, '429'):
+                p.fetch_album_cover(url)
+        get.assert_called_once()
+
+    def test_name_matches_beat_popular_unrelated_results(self):
+        track = p.Track(1, 'Silent River', ('Elena Marlow',), '', 180)
+        unrelated = dict(id='popular', title='Another Song Official Audio Lyrics', channel='Famous Artist - Topic', duration=180, view_count=500_000_000)
+        wrong_artist = dict(id='wrong-artist', title='Silent River Official Audio', channel='Famous Artist - Topic', duration=180)
+        close = dict(id='close', title='Elena Marlo - Silent Rivers (Lyrics)', channel='Small uploader', duration=200)
+        exact = dict(id='exact', title='Elena Marlow - Silent River', channel='Small uploader', duration=210)
+        self.assertGreater(p.score_candidate(unrelated, track), p.score_candidate(exact, track))
+        ranked = p.rank_youtube_entries([unrelated, wrong_artist, close, exact], track, 12)
+        self.assertEqual([c.url.rsplit('=', 1)[-1] for c in ranked], ['exact', 'close'])
+
+    def test_recording_type_follows_spotify_title(self):
+        normal = dict(id='normal', title='Sena Sahin - Yarali', duration=205)
+        acoustic = dict(id='acoustic', title='Yarali - Sena Sahin (Akustik)', duration=203, view_count=500_000_000)
+        for suffix, expected in [('', 'normal'), (' (Acoustic)', 'acoustic'), (' - Accoustic Version', 'acoustic'), (' (Akustik)', 'acoustic')]:
+            with self.subTest(suffix=suffix):
+                track = p.Track(1, 'Yarali' + suffix, ('Sena Sahin',), '', 205)
+                candidates = p.rank_youtube_entries([acoustic, normal], track, 12)
+                self.assertTrue(candidates[0].url.endswith('=' + expected))
+        # Still allow the other version when it is the only name match.
+        self.assertTrue(p.rank_youtube_entries([acoustic], p.Track(1, 'Yarali', ('Sena Sahin',), '', 205), 12)[0].url.endswith('=acoustic'))
+
+    def test_no_name_match_uses_legacy_ranking(self):
+        track = p.Track(1, 'Silent River', ('Elena Marlow',), '', 180)
+        entries = [dict(id='a', title='Unrelated', channel='Someone', duration=240),
+                   dict(id='b', title='Different Official Audio', channel='Other - Topic', duration=180)]
+        ranked = p.rank_youtube_entries(entries, track, 12)
+        expected = max(entries, key=lambda entry: p.score_candidate(entry, track))
+        self.assertTrue(ranked[0].url.endswith('=' + expected['id']))
+
+    def test_names_handle_accents_and_whole_tokens(self):
+        self.assertEqual(p.name_similarity('G\u00fcl\u0131', 'Guli (Official Audio)'), 1)
+        self.assertLess(p.name_similarity('Air', 'Fairground'), 0.82)
+        self.assertEqual(p.name_similarity('\u041c\u0438\u0440', '\u041c\u0438\u0440 Lyrics'), 1)
+
+    def test_search_scans_all_queries_with_bounded_results(self):
+        track = p.Track(1, 'Silent River', ('Elena Marlow',), '', 180)
+        unrelated = dict(id='a', title='Different Official Audio', channel='Other - Topic', duration=180)
+        match = dict(id='b', title='Elena Marlow - Silent River', duration=190)
+        ydl = Mock()
+        ydl.extract_info.side_effect = [{'entries': [unrelated]}, {'entries': [match]}]
+        context = Mock()
+        context.__enter__ = Mock(return_value=ydl)
+        context.__exit__ = Mock(return_value=False)
+        with patch.object(p, 'YoutubeDL', return_value=context), patch.object(p, 'youtube_queries', return_value=['first', 'second']):
+            ranked = p.search_youtube_candidates(track, 12)
+        self.assertTrue(ranked[0].url.endswith('=b'))
+        self.assertEqual(ydl.extract_info.call_count, 2)
+        self.assertEqual(ydl.extract_info.call_args_list[1].args[0], 'ytsearch12:second')
+
     def test_artwork_and_tags_preserve_audio(self):
         image = Image.effect_noise((900, 700), 100).convert('RGB')
         source = io.BytesIO()
