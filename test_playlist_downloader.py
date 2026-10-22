@@ -132,6 +132,36 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(ydl.extract_info.call_count, 2)
         self.assertEqual(ydl.extract_info.call_args_list[1].args[0], 'ytsearch12:second')
 
+    def test_search_keeps_matches_when_optional_query_is_blocked(self):
+        track = p.Track(1, 'Song', ('Artist',), '', 180)
+        ydl = Mock()
+        ydl.extract_info.side_effect = [
+            {'entries': [dict(id='match', title='Artist Song', duration=180)]},
+            p.DownloadError('HTTP Error 403: Forbidden'),
+        ]
+        context = Mock()
+        context.__enter__ = Mock(return_value=ydl)
+        context.__exit__ = Mock(return_value=False)
+        with patch.object(p, 'YoutubeDL', return_value=context), \
+             patch.object(p, 'youtube_queries', return_value=['first', 'second', 'third']):
+            ranked = p.search_youtube_candidates(track, 12)
+        self.assertTrue(ranked[0].url.endswith('=match'))
+        self.assertEqual(ydl.extract_info.call_count, 2)
+
+    def test_search_stops_repeated_blocked_queries(self):
+        ydl = Mock()
+        ydl.extract_info.side_effect = p.DownloadError('HTTP Error 403: Forbidden')
+        context = Mock()
+        context.__enter__ = Mock(return_value=ydl)
+        context.__exit__ = Mock(return_value=False)
+        with patch.object(p, 'YoutubeDL', return_value=context), \
+             patch.object(p, 'youtube_queries', return_value=['first', 'second', 'third']), \
+             patch.object(p.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, 'YouTube search failed'):
+                p.search_youtube_candidates(p.Track(1, 'Song', ('Artist',), '', 180), 12)
+        self.assertEqual(ydl.extract_info.call_count, 2)
+        sleep.assert_called_once_with(5)
+
     def test_artwork_and_tags_preserve_audio(self):
         image = Image.effect_noise((900, 700), 100).convert('RGB')
         source = io.BytesIO()

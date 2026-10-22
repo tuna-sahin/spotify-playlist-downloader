@@ -44,8 +44,10 @@ except ImportError:
 
 try:
     from yt_dlp import YoutubeDL
+    from yt_dlp.utils import DownloadError
 except ImportError:
     YoutubeDL = None  # type: ignore[assignment]
+    DownloadError = RuntimeError  # type: ignore[misc,assignment]
 
 try:
     from PIL import Image, ImageOps
@@ -69,7 +71,7 @@ SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
 APP_NAME = "spotify playlist downloader --- Tuna"
-APP_VERSION = "1.4"
+APP_VERSION = "1.4.1"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repository}/releases/latest"
@@ -123,6 +125,7 @@ TITLE_NOISE = re.compile(
 SAFE_CHARS = f"-_.() {string.ascii_letters}{string.digits}"
 PRINT_LOCK = threading.Lock()
 ARTWORK_LOCK = threading.Lock()
+YOUTUBE_SEARCH_LOCK = threading.Lock()
 
 
 def app_base_dir() -> Path:
@@ -1643,23 +1646,45 @@ def search_youtube_candidates(track: Track, max_results: int) -> list[Candidate]
         "no_warnings": True,
         "extract_flat": "in_playlist",
         "skip_download": True,
+        "sleep_interval_requests": 1,
+        "extractor_retries": 2,
     }
 
     entries_by_id: dict[str, dict[str, Any]] = {}
     max_results = max(1, max_results)
     per_query = max_results
-    with YoutubeDL(ydl_opts) as ydl:
+    failures: list[str] = []
+    # Search pagination is lazy: retain entries yielded before a later page fails.
+    # Serialize searches across download workers to avoid bursts of API requests.
+    with YOUTUBE_SEARCH_LOCK, YoutubeDL(ydl_opts) as ydl:
         for query in youtube_queries(track):
-            result = ydl.extract_info(f"ytsearch{per_query}:{query}", download=False)
-            for entry in result.get("entries", []) or []:
-                if not entry:
-                    continue
-                key = entry.get("id") or entry.get("url") or entry.get("title")
-                if key and key not in entries_by_id:
-                    entries_by_id[key] = entry
+            try:
+                result = ydl.extract_info(f"ytsearch{per_query}:{query}", download=False)
+                for entry in (result or {}).get("entries", []) or []:
+                    if not entry:
+                        continue
+                    key = entry.get("id") or entry.get("url") or entry.get("title")
+                    if key and key not in entries_by_id:
+                        entries_by_id[key] = entry
+            except DownloadError as exc:
+                failures.append(str(exc))
+                blocked = "403" in str(exc) or "429" in str(exc)
+                if blocked and entries_by_id:
+                    break
+                if blocked and len(failures) >= 2:
+                    break
+                if blocked:
+                    time.sleep(5)
+                continue
 
     entries = list(entries_by_id.values())
     if not entries:
+        if failures:
+            raise RuntimeError(
+                "YouTube search failed. Update yt-dlp (rebuild the exe if using it). "
+                "If requests remain blocked, wait before retrying and use --workers 1. "
+                "Existing MP3s will be skipped on rerun. Last error: " + failures[-1]
+            )
         raise RuntimeError("no YouTube results")
 
     return rank_youtube_entries(entries, track, max_results)
