@@ -13,6 +13,7 @@ import concurrent.futures
 import dataclasses
 import hashlib
 import html
+import io
 import json
 import os
 import re
@@ -44,6 +45,13 @@ try:
 except ImportError:
     YoutubeDL = None  # type: ignore[assignment]
 
+try:
+    from PIL import Image, ImageOps
+    from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TRCK, ID3NoHeaderError
+except ImportError:
+    Image = None
+    ID3 = None
+
 
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
@@ -59,7 +67,7 @@ SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
 APP_NAME = "spotify playlist downloader --- Tuna"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repository}/releases/latest"
@@ -284,6 +292,8 @@ def require_dependencies() -> None:
         missing.append("requests")
     if YoutubeDL is None:
         missing.append("yt-dlp")
+    if Image is None or ID3 is None:
+        missing.extend(["Pillow", "mutagen"])
 
     if missing:
         raise RuntimeError(
@@ -332,6 +342,7 @@ class Track:
     artists: tuple[str, ...]
     album: str
     duration_seconds: int
+    artwork_url: str = ""
 
     @property
     def artist_text(self) -> str:
@@ -363,6 +374,7 @@ class PlaylistMetadata:
     tracks: list[Track]
     total_count: int | None
     source: str
+    name: str = ""
 
 
 class SpotifyUserAuthRequired(RuntimeError):
@@ -753,6 +765,7 @@ def track_from_item(item: dict[str, Any], index: int) -> Track | None:
         artists=artists,
         album=track.get("album", {}).get("name", ""),
         duration_seconds=round(track["duration_ms"] / 1000),
+        artwork_url=spotify_image_url(track.get("album", {}).get("images", [])),
     )
 
 
@@ -776,6 +789,7 @@ def track_from_public_item(item: dict[str, Any], index: int) -> Track | None:
             artists=artists,
             album=track.get("albumOfTrack", {}).get("name", ""),
             duration_seconds=round(track["duration"]["totalMilliseconds"] / 1000),
+            artwork_url=spotify_image_url(track.get("albumOfTrack", {}).get("coverArt", {}).get("sources", [])),
         )
     except (KeyError, TypeError):
         return None
@@ -830,6 +844,7 @@ def fetch_metadata_from_public_page(playlist_id: str) -> PlaylistMetadata:
         tracks=tracks,
         total_count=total_count if isinstance(total_count, int) else None,
         source="public page",
+        name=playlist.get("name", ""),
     )
 
 
@@ -857,6 +872,7 @@ def track_from_embed_item(item: dict[str, Any], index: int) -> Track | None:
         artists=artists,
         album="",
         duration_seconds=round(duration_ms / 1000),
+        artwork_url=spotify_image_url(item.get("imageUri", "") or item.get("images", [])),
     )
 
 
@@ -912,6 +928,7 @@ def fetch_metadata_from_embed_page(playlist_id: str) -> PlaylistMetadata:
         tracks=tracks,
         total_count=None,
         source="embed page",
+        name=entity.get("name", "") or entity.get("title", ""),
     )
 
 
@@ -1101,6 +1118,7 @@ def rendered_row_to_track(row: dict[str, Any]) -> Track | None:
         artists=tuple(str(artist) for artist in artists if artist),
         album=str(row.get("album") or ""),
         duration_seconds=duration_seconds,
+        artwork_url=spotify_image_url(row.get("artwork_url", "")),
     )
 
 
@@ -1159,6 +1177,7 @@ def fetch_metadata_from_rendered_spotify_page(
                             title: (titleLink.textContent || '').trim(),
                             artists: artistLinks.map((link) => (link.textContent || '').trim()).filter(Boolean),
                             album: albumLink ? (albumLink.textContent || '').trim() : '',
+                            artwork_url: row.querySelector('img')?.src || '',
                             duration: duration ? duration[0] : '',
                         };
                     };
@@ -1330,7 +1349,7 @@ def fetch_remaining_public_tracks_with_app_token(
 
 def fetch_tracks_from_items_endpoint(playlist_id: str, token: str) -> list[Track]:
     fields = (
-        "items(track(type,name,duration_ms,album(name),artists(name),is_local)),"
+        "items(track(type,name,duration_ms,album(name,images),artists(name),is_local)),"
         "next,total"
     )
     params = {"limit": 100, "fields": fields}
@@ -1378,7 +1397,7 @@ def fetch_tracks_from_items_endpoint(playlist_id: str, token: str) -> list[Track
 def fetch_tracks_from_playlist_details(playlist_id: str, token: str) -> list[Track]:
     fields = (
         "tracks.total,tracks.next,tracks.items(track(type,name,duration_ms,"
-        "album(name),artists(name),is_local))"
+        "album(name,images),artists(name),is_local))"
     )
     params = {"fields": fields}
     playlist = spotify_get_json(
@@ -1429,7 +1448,7 @@ def normalize_text(value: str) -> str:
 
 def ascii_fallback(value: str) -> str:
     return (
-        unicodedata.normalize("NFKD", value)
+        unicodedata.normalize("NFKD", value.translate(str.maketrans({"ı": "i", "ß": "ss", "ø": "o", "Ø": "O", "ł": "l", "Ł": "L", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE"})))
         .encode("ascii", "ignore")
         .decode("ascii")
     )
@@ -1478,7 +1497,7 @@ def youtube_queries(track: Track) -> list[str]:
 
 
 def sanitize_filename(value: str, max_length: int = 160) -> str:
-    cleaned = "".join(char if char in SAFE_CHARS else "_" for char in value)
+    cleaned = "".join(char if char in SAFE_CHARS or char.isalnum() else "_" for char in value)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ._")
     cleaned = re.sub(r"_+", "_", cleaned)
     return cleaned[:max_length].rstrip(" ._") or "track"
@@ -1594,9 +1613,98 @@ def search_youtube(track: Track, max_results: int) -> Candidate:
     return search_youtube_candidates(track, max_results=max_results)[0]
 
 
-def output_template(output_dir: Path, track: Track, width: int) -> str:
+def spotify_image_url(images: Any) -> str:
+    if isinstance(images, str):
+        if images.startswith("spotify:image:"):
+            return "https://i.scdn.co/image/" + images.rsplit(":", 1)[-1]
+        return images if images.startswith("https://") else ""
+    if isinstance(images, list):
+        sources = [item for item in images if isinstance(item, dict) and item.get("url")]
+        if sources:
+            return max(sources, key=lambda item: item.get("width") or 0)["url"]
+    return ""
+
+
+def prepare_cover(data: bytes) -> bytes:
+    with Image.open(io.BytesIO(data)) as source:
+        cover = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGB"), (500, 500), method=Image.Resampling.LANCZOS)
+    for quality in range(95, 0, -5):
+        buffer = io.BytesIO()
+        cover.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=False)
+        result = buffer.getvalue()
+        if len(result) < 100_000:
+            return result
+    raise ValueError("Could not compress album artwork below 100,000 bytes.")
+
+
+def write_mp3_tags(path: Path, track: Track, include_album_art: bool, ascii_names: bool) -> None:
+    try:
+        tags = ID3(path)
+    except ID3NoHeaderError:
+        tags = ID3()
+    for frame_id, frame_type, value in (
+        ("TIT2", TIT2, track.title), ("TPE1", TPE1, track.artist_text),
+        ("TALB", TALB, track.album), ("TRCK", TRCK, str(track.index)),
+    ):
+        tags.delall(frame_id)
+        tags.add(frame_type(encoding=1, text=ascii_fallback(value) if ascii_names else value))
+    tags.delall("APIC")
+    if include_album_art and track.artwork_url:
+        try:
+            response = requests.get(track.artwork_url, timeout=30)
+            response.raise_for_status()
+            tags.add(APIC(encoding=1, mime="image/jpeg", type=3, desc="Front Cover", data=prepare_cover(response.content)))
+        except Exception as exc:
+            log(f"{track.index}. Skipping unavailable album artwork: {exc}")
+    tags.update_to_v23()
+    for frame in tags.values():
+        if hasattr(frame, "encoding"):
+            frame.encoding = 1
+    tags.save(path, v2_version=3, v1=0)
+
+
+def load_config() -> dict[str, bool]:
+    defaults = {"include_album_art": True, "ascii_names": False, "create_m3u": False}
+    try:
+        saved = json.loads((app_base_dir() / "config.json").read_text(encoding="utf-8"))
+        return {key: saved.get(key) if isinstance(saved.get(key), bool) else value for key, value in defaults.items()}
+    except (OSError, ValueError, AttributeError):
+        return defaults
+
+
+def config_prompt(args: argparse.Namespace) -> None:
+    options = (("include_album_art", "Include album art", True), ("ascii_names", "Convert non-ASCII characters to ASCII", False), ("create_m3u", "Create M3U playlist", False))
+    while True:
+        log("\nConfiguration (enter an option number to toggle; Enter to save):")
+        for number, (key, label, default) in enumerate(options, 1):
+            log(f"  {number}. {label} = {getattr(args, key)} (default {default})")
+        choice = input("Option: ").strip()
+        if not choice:
+            settings = {key: getattr(args, key) for key, _, _ in options}
+            (app_base_dir() / "config.json").write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+            return
+        if choice in ("1", "2", "3"):
+            key = options[int(choice) - 1][0]
+            setattr(args, key, not getattr(args, key))
+        else:
+            log("Choose 1, 2, or 3, or press Enter to save.")
+
+
+def write_m3u(output_dir: Path, tracks: list[Track], width: int, ascii_names: bool, successful: set[int]) -> Path:
+    lines = ["#EXTM3U"]
+    for track in tracks:
+        path = Path(output_template(output_dir, track, width, ascii_names).replace("%(ext)s", "mp3"))
+        if track.index in successful and path.is_file():
+            lines.append(path.relative_to(output_dir.parent).as_posix())
+    destination = output_dir.with_suffix(output_dir.suffix + ".m3u")
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return destination
+
+
+def output_template(output_dir: Path, track: Track, width: int, ascii_names: bool = False) -> str:
     number = str(track.index).zfill(width)
-    base = sanitize_filename(f"{number} - {track.artist_text} - {track.title}")
+    name = f"{number} - {track.title} - {track.artist_text}"
+    base = sanitize_filename(ascii_fallback(name) if ascii_names else name)
     return str(output_dir / f"{base}.%(ext)s")
 
 
@@ -1608,6 +1716,8 @@ def download_track(
     bitrate: str,
     ffmpeg_location: str | None,
     dry_run: bool,
+    include_album_art: bool = True,
+    ascii_names: bool = False,
 ) -> tuple[int, bool, str]:
     try:
         candidates = search_youtube_candidates(track, max_results=max_results)
@@ -1626,7 +1736,7 @@ def download_track(
 
         ydl_opts = {
             "format": "bestaudio/best",
-            "outtmpl": output_template(output_dir, track, width),
+            "outtmpl": output_template(output_dir, track, width, ascii_names),
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
@@ -1640,17 +1750,6 @@ def download_track(
                     "preferredcodec": "mp3",
                     "preferredquality": bitrate,
                 },
-                {"key": "FFmpegMetadata"},
-            ],
-            "postprocessor_args": [
-                "-metadata",
-                f"title={track.title}",
-                "-metadata",
-                f"artist={track.artist_text}",
-                "-metadata",
-                f"album={track.album}",
-                "-metadata",
-                f"track={track.index}",
             ],
         }
 
@@ -1668,6 +1767,8 @@ def download_track(
             try:
                 with YoutubeDL(ydl_opts) as ydl:
                     ydl.download([candidate.url])
+                mp3_path = Path(output_template(output_dir, track, width, ascii_names).replace("%(ext)s", "mp3"))
+                write_mp3_tags(mp3_path, track, include_album_art, ascii_names)
                 return track.index, True, "downloaded"
             except Exception as exc:  # noqa: BLE001 - try a close alternative once.
                 failures.append(f"{candidate.title}: {exc}")
@@ -1760,7 +1861,9 @@ def build_parser() -> argparse.ArgumentParser:
 def prompt_for_missing_inputs(args: argparse.Namespace) -> None:
     while not args.playlist:
         value = input("Paste the Spotify playlist URL: ").strip()
-        if value:
+        if value.lower() == "config":
+            config_prompt(args)
+        elif value:
             args.playlist = value
         else:
             log("Please enter a Spotify playlist URL.")
@@ -1789,7 +1892,15 @@ def main(argv: list[str] | None = None) -> int:
         if update_started and getattr(sys, "frozen", False):
             return 20
 
-    if interactive:
+    settings = load_config()
+    args.include_album_art = settings["include_album_art"]
+    args.ascii_names = settings["ascii_names"]
+    args.create_m3u = settings["create_m3u"]
+    if args.playlist and args.playlist.lower() == "config":
+        config_prompt(args)
+        args.playlist = None
+        prompt_for_missing_inputs(args)
+    elif interactive:
         prompt_for_missing_inputs(args)
     elif not args.playlist:
         raise ValueError("Please provide a Spotify playlist URL.")
@@ -1937,6 +2048,23 @@ def main(argv: list[str] | None = None) -> int:
                 f"try: python playlist_downloader.py \"{args.playlist}\" --user-auth"
             ) from exc
 
+    playlist_name = public_metadata.name if public_metadata else ""
+    if not playlist_name:
+        try:
+            playlist_name = fetch_metadata_from_embed_page(playlist_id).name
+        except Exception:
+            pass
+    if not playlist_name and "token_info" in locals():
+        try:
+            playlist_name = spotify_get_json(SPOTIFY_PLAYLIST_DETAILS_URL.format(playlist_id=playlist_id), token_info.access_token, {"fields": "name"}).get("name", "")
+        except Exception:
+            pass
+    if not playlist_name:
+        raise RuntimeError("Could not determine the Spotify playlist name for the output folder.")
+    folder_name = ascii_fallback(playlist_name) if args.ascii_names else playlist_name
+    output_dir = output_dir / sanitize_filename(folder_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     if args.limit:
         tracks = tracks[: args.limit]
 
@@ -1954,6 +2082,7 @@ def main(argv: list[str] | None = None) -> int:
     log(f"Found {len(tracks)} tracks. Output: {output_dir}")
 
     failures: list[tuple[int, str]] = []
+    successful: set[int] = set()
     worker_count = max(1, args.workers)
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [
@@ -1966,15 +2095,23 @@ def main(argv: list[str] | None = None) -> int:
                 args.bitrate,
                 ffmpeg_location,
                 args.dry_run,
+                args.include_album_art,
+                args.ascii_names,
             )
             for track in tracks
         ]
 
         for future in concurrent.futures.as_completed(futures):
             index, ok, detail = future.result()
+            if ok:
+                successful.add(index)
             if not ok:
                 failures.append((index, detail))
                 log(f"{str(index).zfill(width)}. FAILED: {detail}")
+
+    if args.create_m3u and not args.dry_run:
+        playlist_file = write_m3u(output_dir, tracks, width, args.ascii_names, successful)
+        log(f"Playlist file: {playlist_file}")
 
     if failures:
         log("\nSome tracks failed:")

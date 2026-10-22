@@ -1,5 +1,6 @@
 param(
-    [string]$CredentialFile = ""
+    [string]$CredentialFile = "",
+    [string]$PythonExecutable = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -173,8 +174,9 @@ if (-not $ffprobe) {
     throw "Could not find ffprobe.exe. Install FFmpeg first, for example: winget install --id Gyan.FFmpeg -e"
 }
 
-if (-not (Test-Path $icon)) {
-    throw "Could not find icon file: $icon"
+$iconArgs = @()
+if (Test-Path $icon) {
+    $iconArgs = @("--icon", $icon)
 }
 
 $credentialSourceFile = $null
@@ -235,13 +237,12 @@ try {
         "--clean",
         "--onefile",
         "--console",
-        "--icon", $icon,
         "--name", "Spotify Playlist Downloader",
         "--add-binary", "$($ffmpeg.FullName);.",
         "--add-binary", "$($ffprobe.FullName);."
-    ) + $extraArgs + @("playlist_downloader.py")
+    ) + $iconArgs + $extraArgs + @("playlist_downloader.py")
 
-    & python @pyinstallerArgs
+    & $PythonExecutable @pyinstallerArgs
 
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller failed with exit code $LASTEXITCODE"

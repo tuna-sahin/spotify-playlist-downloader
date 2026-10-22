@@ -9,3 +9,9 @@ spotify_credentials
 spotify_credentials.txt
 spotify_credentials.json
 spotify_credentials.env
+
+config.json
+.test-deps/
+.release-deps/
+.release-notes.md
+.publish_release.py

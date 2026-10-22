@@ -159,6 +159,23 @@ http://127.0.0.1:8888/callback
 Files are named like:
 
 ```text
-01 - Artist - Song.mp3
-02 - Artist - Song.mp3
+Playlist Name/01 - Song - Artist.mp3
+Playlist Name/02 - Song - Artist.mp3
 ```
+
+### Download settings
+
+Type `config` at the playlist URL prompt (or run `playlist_downloader.py config`).
+Enter an option number to toggle it, then press Enter to save and return to the URL prompt.
+Settings are saved in `config.json` beside the script/executable:
+
+- Include album art: **true** by default. Uses Spotify covers when available; skips unavailable covers.
+- Convert non-ASCII characters to ASCII: **false** by default. Applies to song filenames, playlist folder names, and metadata (for example, ü → u and ı → i).
+- Create M3U playlist: **false** by default. Creates `Playlist Name.m3u` beside the `Playlist Name/` folder, with relative paths to successful downloads in playlist order. Dry runs do not create it.
+
+Songs are saved beneath the selected output directory in a folder named after the playlist.
+Artwork is a 500 × 500 RGB baseline JPEG under 100,000 bytes, embedded as Front Cover
+(APIC type 3, `image/jpeg`). Tags use ID3v2.3 with UTF-16 text. Updating tags preserves
+the MP3 audio bytes; the existing YouTube-to-MP3 conversion still happens when needed.
+Install the updated dependencies with `python -m pip install -r requirements.txt`.
+Rebuild the executable to include these changes when using the packaged application.
