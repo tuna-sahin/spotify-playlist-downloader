@@ -69,7 +69,7 @@ SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
 APP_NAME = "spotify playlist downloader --- Tuna"
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.4"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repository}/releases/latest"
@@ -1782,10 +1782,29 @@ def order_tracks(tracks: list[Track], sort_by_artist: bool) -> list[Track]:
     return [dataclasses.replace(track, index=index) for index, track in enumerate(ordered, 1)]
 
 
-def write_m3u(output_dir: Path, tracks: list[Track], width: int, ascii_names: bool, successful: set[int]) -> Path:
+def existing_track_files(output_dir: Path, tracks: list[Track], width: int) -> dict[int, Path]:
+    """Find completed, nonempty MP3s without depending on playlist numbering."""
+    files: dict[str, Path] = {}
+    for path in sorted(output_dir.iterdir()):
+        if path.is_file() and path.suffix.casefold() == ".mp3" and path.stat().st_size > 0:
+            name = re.sub(r"^\d+ - ", "", path.stem)
+            files.setdefault(unicodedata.normalize("NFC", name).casefold(), path)
+    existing = {}
+    for track in tracks:
+        for ascii_names in (False, True):
+            stem = Path(output_template(output_dir, track, width, ascii_names)).stem
+            name = re.sub(r"^\d+ - ", "", stem)
+            path = files.get(unicodedata.normalize("NFC", name).casefold())
+            if path is not None:
+                existing[track.index] = path
+                break
+    return existing
+
+
+def write_m3u(output_dir: Path, tracks: list[Track], width: int, ascii_names: bool, successful: set[int], existing: dict[int, Path] | None = None) -> Path:
     lines = ["#EXTM3U", "#EXTENC:UTF-8", f"#PLAYLIST:{output_dir.name}"]
     for track in tracks:
-        path = Path(output_template(output_dir, track, width, ascii_names).replace("%(ext)s", "mp3"))
+        path = (existing or {}).get(track.index) or Path(output_template(output_dir, track, width, ascii_names).replace("%(ext)s", "mp3"))
         if track.index in successful and path.is_file():
             display_name = path.stem.split(" - ", 1)[-1]
             lines.append(f"#EXTINF:{track.duration_seconds},{display_name}")
@@ -2167,8 +2186,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit:
         tracks = tracks[: args.limit]
 
+    numbering_total = playlist_total_count or len(tracks)
+    width = max(2, len(str(numbering_total)))
+    existing = existing_track_files(output_dir, tracks, width)
+    pending = [track for track in tracks if track.index not in existing]
+    log(f"Found {len(tracks)} tracks. Output: {output_dir}")
+    for track in tracks:
+        if track.index in existing:
+            log(f"{str(track.index).zfill(width)}. Skipping existing song: {existing[track.index].name}")
+    log(f"Already present: {len(existing)}. Missing: {len(pending)}.")
+
     ffmpeg_location = find_ffmpeg_location()
-    if not args.dry_run and not ffmpeg_location:
+    if pending and not args.dry_run and not ffmpeg_location:
         raise RuntimeError(
             "ffmpeg is required for MP3 conversion but was not found. Install ffmpeg "
             "or set FFMPEG_LOCATION to the folder containing ffmpeg.exe."
@@ -2176,12 +2205,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.spotify_debug and ffmpeg_location:
         log(f"ffmpeg location: {ffmpeg_location}")
 
-    numbering_total = playlist_total_count or len(tracks)
-    width = max(2, len(str(numbering_total)))
-    log(f"Found {len(tracks)} tracks. Output: {output_dir}")
-
     failures: list[tuple[int, str]] = []
-    successful: set[int] = set()
+    successful: set[int] = set(existing)
     worker_count = max(1, args.workers)
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [
@@ -2197,7 +2222,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.include_album_art,
                 args.ascii_names,
             )
-            for track in tracks
+            for track in pending
         ]
 
         for future in concurrent.futures.as_completed(futures):
@@ -2209,7 +2234,7 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"{str(index).zfill(width)}. FAILED: {detail}")
 
     if args.create_m3u and not args.dry_run:
-        playlist_file = write_m3u(output_dir, tracks, width, args.ascii_names, successful)
+        playlist_file = write_m3u(output_dir, tracks, width, args.ascii_names, successful, existing)
         log(f"Playlist file: {playlist_file}")
 
     if failures:

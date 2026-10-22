@@ -9,8 +9,51 @@ from mutagen.id3 import ID3
 import playlist_downloader as p
 
 class DownloaderTests(unittest.TestCase):
+    def test_existing_songs_ignore_numbering_and_preserve_m3u_paths(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+            root = Path(folder) / 'Playlist'
+            root.mkdir()
+            tracks = [p.Track(1, 'Song', ('Artist',), '', 30),
+                      p.Track(2, 'Missing', ('Artist',), '', 30),
+                      p.Track(3, 'Gül', ('Other',), '', 30)]
+            old = root / '099 - Song - Artist.MP3'
+            old.write_bytes(b'audio')
+            (root / '04 - Gul - Other.mp3').write_bytes(b'audio')
+            (root / '02 - Missing - Artist.mp3').touch()
+            (root / '02 - Missing - Artist.mp3.part').write_bytes(b'partial')
+            (root / 'Song - Someone else.mp3').write_bytes(b'audio')
+            existing = p.existing_track_files(root, tracks, 2)
+            self.assertEqual(set(existing), {1, 3})
+            self.assertEqual(existing[1], old)
+            playlist = p.write_m3u(root, tracks, 2, False, set(existing), existing)
+            content = playlist.read_text(encoding='utf-8-sig')
+            self.assertIn('Playlist\\099 - Song - Artist.MP3', content)
+            self.assertIn('Playlist\\04 - Gul - Other.mp3', content)
+            self.assertNotIn('Missing', content)
+            self.assertEqual(old.read_bytes(), b'audio')
+
     def setUp(self):
         p.cached_album_cover.cache_clear()
+
+    def test_resume_only_submits_missing_tracks(self):
+        tracks = [p.Track(1, 'Existing', ('Artist',), '', 30), p.Track(2, 'Missing', ('Artist',), '', 30)]
+        metadata = p.PlaylistMetadata(tracks, 2, 'test', 'Playlist')
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+            output = Path(folder) / 'Playlist'
+            output.mkdir()
+            (output / '01 - Existing - Artist.mp3').write_bytes(b'audio')
+            with patch.object(p, 'fetch_metadata_from_public_page', return_value=metadata), \
+                 patch.object(p, 'find_ffmpeg_location', return_value='ffmpeg'), \
+                 patch.object(p, 'download_track', return_value=(2, True, 'downloaded')) as download:
+                self.assertEqual(p.main(['A' * 22, '-o', folder, '--no-update-check']), 0)
+                self.assertEqual(download.call_count, 1)
+                self.assertEqual(download.call_args.args[0], tracks[1])
+            (output / '02 - Missing - Artist.mp3').write_bytes(b'audio')
+            with patch.object(p, 'fetch_metadata_from_public_page', return_value=metadata), \
+                 patch.object(p, 'find_ffmpeg_location', return_value=None), \
+                 patch.object(p, 'download_track') as download:
+                self.assertEqual(p.main(['A' * 22, '-o', folder, '--no-update-check']), 0)
+                download.assert_not_called()
 
     def test_cover_upgrades_thumbnail_and_caches_album(self):
         buffer = io.BytesIO()

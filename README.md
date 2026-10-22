@@ -187,6 +187,12 @@ M3U files use UTF-8 with a BOM, CRLF line endings, backslash-separated relative 
 and `#EXTENC`, `#PLAYLIST`, and `#EXTINF` entries for device compatibility.
 
 Songs are saved beneath the selected output directory in a folder named after the playlist.
+Version 1.4 checks that folder before downloading and skips nonempty MP3 files whose
+title and artist match the downloader's filenames, even if their track numbers changed.
+Both original and ASCII filenames are recognized. Only missing songs are downloaded;
+empty files and partial downloads are retried. Existing files keep their filenames and
+tags, and M3U playlists include their actual paths. The app reports how many songs are
+already present and how many are missing.
 Artwork is a 500 × 500 RGB baseline JPEG under 100,000 bytes, embedded as Front Cover
 (APIC type 3, `image/jpeg`). Tags use ID3v2.3 with UTF-16 text. Updating tags preserves
 the MP3 audio bytes; the existing YouTube-to-MP3 conversion still happens when needed.
