@@ -67,7 +67,7 @@ SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
 APP_NAME = "spotify playlist downloader --- Tuna"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repository}/releases/latest"
@@ -1691,13 +1691,15 @@ def config_prompt(args: argparse.Namespace) -> None:
 
 
 def write_m3u(output_dir: Path, tracks: list[Track], width: int, ascii_names: bool, successful: set[int]) -> Path:
-    lines = ["#EXTM3U"]
+    lines = ["#EXTM3U", "#EXTENC:UTF-8", f"#PLAYLIST:{output_dir.name}"]
     for track in tracks:
         path = Path(output_template(output_dir, track, width, ascii_names).replace("%(ext)s", "mp3"))
         if track.index in successful and path.is_file():
-            lines.append(path.relative_to(output_dir.parent).as_posix())
+            display_name = path.stem.split(" - ", 1)[-1]
+            lines.append(f"#EXTINF:{track.duration_seconds},{display_name}")
+            lines.append(path.relative_to(output_dir.parent).as_posix().replace("/", "\\"))
     destination = output_dir.with_suffix(output_dir.suffix + ".m3u")
-    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    destination.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8-sig"))
     return destination
 
 

@@ -173,6 +173,9 @@ Settings are saved in `config.json` beside the script/executable:
 - Convert non-ASCII characters to ASCII: **false** by default. Applies to song filenames, playlist folder names, and metadata (for example, ü → u and ı → i).
 - Create M3U playlist: **false** by default. Creates `Playlist Name.m3u` beside the `Playlist Name/` folder, with relative paths to successful downloads in playlist order. Dry runs do not create it.
 
+M3U files use UTF-8 with a BOM, CRLF line endings, backslash-separated relative paths,
+and `#EXTENC`, `#PLAYLIST`, and `#EXTINF` entries for device compatibility.
+
 Songs are saved beneath the selected output directory in a folder named after the playlist.
 Artwork is a 500 × 500 RGB baseline JPEG under 100,000 bytes, embedded as Front Cover
 (APIC type 3, `image/jpeg`). Tags use ID3v2.3 with UTF-16 text. Updating tags preserves

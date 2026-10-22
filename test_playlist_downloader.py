@@ -58,7 +58,19 @@ class DownloaderTests(unittest.TestCase):
             path.touch()
             playlist = p.write_m3u(output, tracks, 2, True, {1})
             self.assertEqual(playlist, root / 'My Playlist.m3u')
-            self.assertEqual(playlist.read_text(), '#EXTM3U\nMy Playlist/01 - Guli - Artist.mp3\n')
+            self.assertEqual(playlist.read_bytes(), ('#EXTM3U\r\n#EXTENC:UTF-8\r\n#PLAYLIST:My Playlist\r\n#EXTINF:30,Guli - Artist\r\nMy Playlist\\01 - Guli - Artist.mp3\r\n').encode('utf-8-sig'))
+
+    def test_m3u_matches_device_example(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+            output = Path(folder) / 'farazi_v_kayra'
+            output.mkdir()
+            track = p.Track(1, 'Yang\u0131n I: Sakin', ('Farazi V Kayra',), '', 156)
+            Path(p.output_template(output, track, 2).replace('%(ext)s', 'mp3')).touch()
+            playlist = p.write_m3u(output, [track], 2, False, {1})
+            expected = ('#EXTM3U\r\n#EXTENC:UTF-8\r\n#PLAYLIST:farazi_v_kayra\r\n'
+                        '#EXTINF:156,Yang\u0131n I_ Sakin - Farazi V Kayra\r\n'
+                        'farazi_v_kayra\\01 - Yang\u0131n I_ Sakin - Farazi V Kayra.mp3\r\n')
+            self.assertEqual(playlist.read_bytes(), expected.encode('utf-8-sig'))
 
 if __name__ == '__main__':
     unittest.main()
