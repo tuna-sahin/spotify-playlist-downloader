@@ -45,11 +45,12 @@ class DownloaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
             root = Path(folder)
             with patch.object(p, 'app_base_dir', return_value=root):
-                self.assertEqual(p.load_config(), dict(include_album_art=True, ascii_names=False, create_m3u=False))
+                self.assertEqual(p.load_config(), dict(include_album_art=True, ascii_names=False, create_m3u=False, sort_by_artist=False))
                 args = argparse.Namespace(**p.load_config())
-                with patch('builtins.input', side_effect=['3', '']):
+                with patch('builtins.input', side_effect=['3', '4', '']):
                     p.config_prompt(args)
                 self.assertTrue(p.load_config()['create_m3u'])
+                self.assertTrue(p.load_config()['sort_by_artist'])
             output = root / 'My Playlist'
             output.mkdir()
             tracks = [p.Track(1, 'G\u00fcl\u0131', ('Artist',), '', 30), p.Track(2, 'Other', ('Artist',), '', 30)]
@@ -59,6 +60,16 @@ class DownloaderTests(unittest.TestCase):
             playlist = p.write_m3u(output, tracks, 2, True, {1})
             self.assertEqual(playlist, root / 'My Playlist.m3u')
             self.assertEqual(playlist.read_bytes(), ('#EXTM3U\r\n#EXTENC:UTF-8\r\n#PLAYLIST:My Playlist\r\n#EXTINF:30,Guli - Artist\r\nMy Playlist\\01 - Guli - Artist.mp3\r\n').encode('utf-8-sig'))
+
+    def test_artist_order_preserves_ties_and_renumbers(self):
+        tracks = [p.Track(1, 'First', ('Zulu',), '', 30),
+                  p.Track(2, 'Second', ('alpha',), '', 30),
+                  p.Track(3, 'Third', ('Alpha',), '', 30)]
+        self.assertEqual(p.order_tracks(tracks, False), tracks)
+        ordered = p.order_tracks(tracks, True)
+        self.assertEqual([t.title for t in ordered], ['Second', 'Third', 'First'])
+        self.assertEqual([t.index for t in ordered], [1, 2, 3])
+        self.assertEqual([t.index for t in tracks], [1, 2, 3])
 
     def test_m3u_matches_device_example(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:

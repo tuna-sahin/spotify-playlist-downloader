@@ -67,7 +67,7 @@ SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
 APP_NAME = "spotify playlist downloader --- Tuna"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repository}/releases/latest"
@@ -1664,7 +1664,7 @@ def write_mp3_tags(path: Path, track: Track, include_album_art: bool, ascii_name
 
 
 def load_config() -> dict[str, bool]:
-    defaults = {"include_album_art": True, "ascii_names": False, "create_m3u": False}
+    defaults = {"include_album_art": True, "ascii_names": False, "create_m3u": False, "sort_by_artist": False}
     try:
         saved = json.loads((app_base_dir() / "config.json").read_text(encoding="utf-8"))
         return {key: saved.get(key) if isinstance(saved.get(key), bool) else value for key, value in defaults.items()}
@@ -1673,7 +1673,7 @@ def load_config() -> dict[str, bool]:
 
 
 def config_prompt(args: argparse.Namespace) -> None:
-    options = (("include_album_art", "Include album art", True), ("ascii_names", "Convert non-ASCII characters to ASCII", False), ("create_m3u", "Create M3U playlist", False))
+    options = (("include_album_art", "Include album art", True), ("ascii_names", "Convert non-ASCII characters to ASCII", False), ("create_m3u", "Create M3U playlist", False), ("sort_by_artist", "Sort by artist", False))
     while True:
         log("\nConfiguration (enter an option number to toggle; Enter to save):")
         for number, (key, label, default) in enumerate(options, 1):
@@ -1683,11 +1683,18 @@ def config_prompt(args: argparse.Namespace) -> None:
             settings = {key: getattr(args, key) for key, _, _ in options}
             (app_base_dir() / "config.json").write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
             return
-        if choice in ("1", "2", "3"):
+        if choice in ("1", "2", "3", "4"):
             key = options[int(choice) - 1][0]
             setattr(args, key, not getattr(args, key))
         else:
-            log("Choose 1, 2, or 3, or press Enter to save.")
+            log("Choose 1, 2, 3, or 4, or press Enter to save.")
+
+
+def order_tracks(tracks: list[Track], sort_by_artist: bool) -> list[Track]:
+    if not sort_by_artist:
+        return tracks
+    ordered = sorted(tracks, key=lambda track: unicodedata.normalize("NFKC", track.artist_text).casefold())
+    return [dataclasses.replace(track, index=index) for index, track in enumerate(ordered, 1)]
 
 
 def write_m3u(output_dir: Path, tracks: list[Track], width: int, ascii_names: bool, successful: set[int]) -> Path:
@@ -1898,6 +1905,7 @@ def main(argv: list[str] | None = None) -> int:
     args.include_album_art = settings["include_album_art"]
     args.ascii_names = settings["ascii_names"]
     args.create_m3u = settings["create_m3u"]
+    args.sort_by_artist = settings["sort_by_artist"]
     if args.playlist and args.playlist.lower() == "config":
         config_prompt(args)
         args.playlist = None
@@ -2066,6 +2074,10 @@ def main(argv: list[str] | None = None) -> int:
     folder_name = ascii_fallback(playlist_name) if args.ascii_names else playlist_name
     output_dir = output_dir / sanitize_filename(folder_name)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    tracks = order_tracks(tracks, args.sort_by_artist)
+    if args.sort_by_artist:
+        log("Sorting playlist by artist.")
 
     if args.limit:
         tracks = tracks[: args.limit]

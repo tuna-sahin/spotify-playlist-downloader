@@ -172,6 +172,7 @@ Settings are saved in `config.json` beside the script/executable:
 - Include album art: **true** by default. Uses Spotify covers when available; skips unavailable covers.
 - Convert non-ASCII characters to ASCII: **false** by default. Applies to song filenames, playlist folder names, and metadata (for example, ü → u and ı → i).
 - Create M3U playlist: **false** by default. Creates `Playlist Name.m3u` beside the `Playlist Name/` folder, with relative paths to successful downloads in playlist order. Dry runs do not create it.
+- Sort by artist: **false** by default, preserving Spotify's custom playlist order. When enabled, sorts alphabetically by artist (case-insensitive), preserving the original order within the same artist. Filenames, track-number tags, and M3U entries follow the sorted order. Sorting happens before `--limit` is applied.
 
 M3U files use UTF-8 with a BOM, CRLF line endings, backslash-separated relative paths,
 and `#EXTENC`, `#PLAYLIST`, and `#EXTINF` entries for device compatibility.
