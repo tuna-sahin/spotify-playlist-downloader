@@ -1,5 +1,6 @@
 import argparse
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,9 @@ class DownloaderTests(unittest.TestCase):
 
     def setUp(self):
         p.cached_album_cover.cache_clear()
+        sleeper = patch.object(p.time, 'sleep')
+        self.sleep = sleeper.start()
+        self.addCleanup(sleeper.stop)
 
     def test_resume_only_submits_missing_tracks(self):
         tracks = [p.Track(1, 'Existing', ('Artist',), '', 30), p.Track(2, 'Missing', ('Artist',), '', 30)]
@@ -126,23 +130,23 @@ class DownloaderTests(unittest.TestCase):
         context = Mock()
         context.__enter__ = Mock(return_value=ydl)
         context.__exit__ = Mock(return_value=False)
-        with patch.object(p, 'YoutubeDL', return_value=context), patch.object(p, 'youtube_queries', return_value=['first', 'second']):
+        with patch.object(p, 'youtube_search_page', side_effect=ydl.extract_info), patch.object(p, 'youtube_queries', return_value=['first', 'second']):
             ranked = p.search_youtube_candidates(track, 12)
         self.assertTrue(ranked[0].url.endswith('=b'))
         self.assertEqual(ydl.extract_info.call_count, 2)
-        self.assertEqual(ydl.extract_info.call_args_list[1].args[0], 'ytsearch12:second')
+        self.assertEqual(ydl.extract_info.call_args_list[1].args[0], 'second')
 
     def test_search_keeps_matches_when_optional_query_is_blocked(self):
         track = p.Track(1, 'Song', ('Artist',), '', 180)
         ydl = Mock()
         ydl.extract_info.side_effect = [
-            {'entries': [dict(id='match', title='Artist Song', duration=180)]},
+            {'entries': [dict(id='match', title='Artist Song', duration=190)]},
             p.DownloadError('HTTP Error 403: Forbidden'),
         ]
         context = Mock()
         context.__enter__ = Mock(return_value=ydl)
         context.__exit__ = Mock(return_value=False)
-        with patch.object(p, 'YoutubeDL', return_value=context), \
+        with patch.object(p, 'youtube_search_page', side_effect=ydl.extract_info), \
              patch.object(p, 'youtube_queries', return_value=['first', 'second', 'third']):
             ranked = p.search_youtube_candidates(track, 12)
         self.assertTrue(ranked[0].url.endswith('=match'))
@@ -154,13 +158,50 @@ class DownloaderTests(unittest.TestCase):
         context = Mock()
         context.__enter__ = Mock(return_value=ydl)
         context.__exit__ = Mock(return_value=False)
-        with patch.object(p, 'YoutubeDL', return_value=context), \
+        with patch.object(p, 'youtube_search_page', side_effect=ydl.extract_info), \
              patch.object(p, 'youtube_queries', return_value=['first', 'second', 'third']), \
              patch.object(p.time, 'sleep') as sleep:
             with self.assertRaisesRegex(RuntimeError, 'YouTube search failed'):
                 p.search_youtube_candidates(p.Track(1, 'Song', ('Artist',), '', 180), 12)
         self.assertEqual(ydl.extract_info.call_count, 2)
-        sleep.assert_called_once_with(5)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 30, 2, 30])
+
+    def test_search_stops_after_strong_match(self):
+        ydl = Mock()
+        ydl.extract_info.return_value = {'entries': [dict(id='match', title='Artist Song', duration=180)]}
+        context = Mock()
+        context.__enter__ = Mock(return_value=ydl)
+        context.__exit__ = Mock(return_value=False)
+        with patch.object(p, 'youtube_search_page', side_effect=ydl.extract_info), \
+             patch.object(p, 'youtube_queries', return_value=['first', 'second']):
+            ranked = p.search_youtube_candidates(p.Track(1, 'Song', ('Artist',), '', 180), 12)
+        self.assertTrue(ranked[0].url.endswith('=match'))
+        ydl.extract_info.assert_called_once()
+
+    def test_runtime_options_enable_bundled_node(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+            root = Path(folder)
+            (root / 'node.exe').touch()
+            with patch.object(p, 'bundle_dir', return_value=root), \
+                 patch.object(p, 'app_base_dir', return_value=root), \
+                 patch.object(p.shutil, 'which', return_value=None):
+                self.assertEqual(p.youtube_runtime_options(), {'js_runtimes': {'node': {'path': str(root / 'node.exe')}}})
+
+    def test_html_search_reads_only_bounded_video_results(self):
+        video = {'videoId': 'abc', 'title': {'runs': [{'text': 'Door'}]},
+                 'ownerText': {'runs': [{'text': 'C418'}]},
+                 'lengthText': {'simpleText': '1:52'}}
+        data = {'contents': [{'playlistRenderer': {'playlistId': 'mix'}},
+                             {'videoRenderer': video}, {'videoRenderer': dict(video, videoId='other')}]}
+        response = Mock(text='<script>var ytInitialData = ' + json.dumps(data) + ';</script>')
+        with patch.object(p.requests, 'get', return_value=response):
+            result = p.youtube_search_page('C418 Door', 1)
+        self.assertEqual(result['entries'], [dict(id='abc', title='Door', channel='C418', duration=112)])
+
+    def test_html_search_reports_verification_page(self):
+        with patch.object(p.requests, 'get', return_value=Mock(text='<html>Verify</html>')):
+            with self.assertRaisesRegex(p.DownloadError, 'consent or verification'):
+                p.youtube_search_page('C418 Door', 3)
 
     def test_artwork_and_tags_preserve_audio(self):
         image = Image.effect_noise((900, 700), 100).convert('RGB')

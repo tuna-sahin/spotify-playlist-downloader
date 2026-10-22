@@ -153,7 +153,19 @@ The result is:
 dist\Spotify Playlist Downloader.exe
 ```
 
-## Spotify 403 errors
+## YouTube search and format errors
+
+YouTube searches use the standard search page with bounded results. The app stops
+optional searches after a strong title, artist, and duration match, spaces searches
+two seconds apart, and pauses search workers for 30 seconds after a 403 or 429.
+Service-side blocking can still occur; existing MP3s are skipped when rerunning.
+
+For Python installs, update with `python -m pip install -U -r requirements.txt`.
+YouTube format extraction requires the `yt-dlp[default]` challenge scripts plus
+Deno >= 2.3 or Node >= 22. The build script requires and bundles both the scripts
+and an installed runtime. Runtime warnings are shown to help diagnose failures.
+
+## Spotify playlist authentication
 
 The script reads public playlist metadata from Spotify's public web page first, so public playlists should work without browser login or Spotify API credentials.
 

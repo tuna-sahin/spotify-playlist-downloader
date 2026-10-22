@@ -214,6 +214,15 @@ $credentialBuildDir = $null
 
 try {
     $extraArgs = @()
+    & $PythonExecutable -c "import yt_dlp_ejs"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'YouTube challenge scripts are missing. Install requirements with pip install -U -r requirements.txt.'
+    }
+    $jsRuntime = Get-Command deno.exe,node.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $jsRuntime) {
+        throw 'Install Deno >= 2.3 or Node >= 22 before building; the runtime will be bundled.'
+    }
+    $extraArgs += @("--add-binary", "$($jsRuntime.Source);.", "--collect-all", "yt_dlp_ejs")
 
     if ($spotifyCredentials) {
         $credentialBuildDir = Join-Path ([System.IO.Path]::GetTempPath()) ("spotify-downloader-build-" + [guid]::NewGuid().ToString("N"))

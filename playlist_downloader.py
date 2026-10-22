@@ -71,7 +71,7 @@ SPOTIFY_QUERY_PLAYLIST_HASH = (
     "908a5597b4d0af0489a9ad6a2d41bc3b416ff47c0884016d92bbd6822d0eb6d8"
 )
 APP_NAME = "spotify playlist downloader --- Tuna"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 GITHUB_REPOSITORY = "tuna-sahin/spotify-playlist-downloader"
 GITHUB_RELEASE_ASSET = "Spotify Playlist Downloader.exe"
 GITHUB_RELEASES_API = "https://api.github.com/repos/{repository}/releases/latest"
@@ -1640,41 +1640,112 @@ def rank_youtube_entries(entries: list[dict[str, Any]], track: Track, max_result
     return [candidate for candidate in candidates if candidate.score >= best_score - 30]
 
 
-def search_youtube_candidates(track: Track, max_results: int) -> list[Candidate]:
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": "in_playlist",
-        "skip_download": True,
-        "sleep_interval_requests": 1,
-        "extractor_retries": 2,
-    }
+def youtube_runtime_options() -> dict[str, Any]:
+    """Enable supported runtimes, including the runtime shipped in our EXE."""
+    runtimes: dict[str, dict[str, str]] = {}
+    for name in ("deno", "node"):
+        for base in (bundle_dir(), app_base_dir()):
+            if base and (base / f"{name}.exe").is_file():
+                runtimes[name] = {"path": str(base / f"{name}.exe")}
+                break
+        else:
+            path = shutil.which(name)
+            if path:
+                runtimes[name] = {"path": path}
+    return {"js_runtimes": runtimes} if runtimes else {}
 
+
+def strong_youtube_match(entry: dict[str, Any], track: Track) -> bool:
+    title, artist = candidate_name_similarity(entry, track)
+    duration = entry.get("duration")
+    return (
+        title >= 0.98 and artist >= 0.98
+        and isinstance(duration, (int, float))
+        and abs(duration - track.duration_seconds) <= 5
+        and is_acoustic_title(entry.get("title") or "") == is_acoustic_title(track.title)
+    )
+
+
+def youtube_search_page(query: str, max_results: int) -> dict[str, Any]:
+    """Read initial video results from HTML without search API pagination."""
+    try:
+        response = requests.get(
+            "https://www.youtube.com/results",
+            params={"search_query": query, "hl": "en"},
+            headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"},
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise DownloadError(f"YouTube search page: {exc}") from exc
+    marker = re.search(r'(?:var\s+ytInitialData|window\["ytInitialData"\]|ytInitialData)\s*=\s*', response.text)
+    if not marker:
+        raise DownloadError("YouTube search page did not include results (possibly a consent or verification page).")
+    try:
+        data, _ = json.JSONDecoder().raw_decode(response.text[marker.end():].lstrip())
+    except ValueError as exc:
+        raise DownloadError("YouTube search page contained invalid result data.") from exc
+    entries = []
+    def visit(node: Any) -> None:
+        if len(entries) >= max_results:
+            return
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+        elif isinstance(node, dict):
+            video = node.get("videoRenderer")
+            if isinstance(video, dict) and video.get("videoId"):
+                def text_value(value: dict[str, Any]) -> str:
+                    return value.get("simpleText") or "".join(run.get("text", "") for run in value.get("runs", []))
+                length = text_value(video.get("lengthText") or {})
+                duration = None
+                if re.fullmatch(r"\d+(?::\d+){1,2}", length):
+                    duration = 0
+                    for part in length.split(":"):
+                        duration = duration * 60 + int(part)
+                entries.append({
+                    "id": video["videoId"],
+                    "title": text_value(video.get("title") or {}),
+                    "channel": text_value(video.get("ownerText") or video.get("longBylineText") or {}),
+                    "duration": duration,
+                })
+                return
+            for value in node.values():
+                visit(value)
+    visit(data.get("contents", {}))
+    return {"entries": entries}
+
+
+def search_youtube_candidates(track: Track, max_results: int) -> list[Candidate]:
     entries_by_id: dict[str, dict[str, Any]] = {}
     max_results = max(1, max_results)
-    per_query = max_results
     failures: list[str] = []
-    # Search pagination is lazy: retain entries yielded before a later page fails.
-    # Serialize searches across download workers to avoid bursts of API requests.
-    with YOUTUBE_SEARCH_LOCK, YoutubeDL(ydl_opts) as ydl:
+    # Serialize searches across download workers to avoid bursts of requests.
+    with YOUTUBE_SEARCH_LOCK:
         for query in youtube_queries(track):
+            time.sleep(2)
             try:
-                result = ydl.extract_info(f"ytsearch{per_query}:{query}", download=False)
+                # The normal search page includes initial results without the
+                # API POST used by ytsearch, which can be rejected with 403.
+                result = youtube_search_page(query, max_results)
                 for entry in (result or {}).get("entries", []) or []:
-                    if not entry:
+                    if not entry or entry.get("ie_key") == "YoutubeTab" or entry.get("_type") == "playlist":
                         continue
                     key = entry.get("id") or entry.get("url") or entry.get("title")
                     if key and key not in entries_by_id:
                         entries_by_id[key] = entry
+                if any(strong_youtube_match(entry, track) for entry in entries_by_id.values()):
+                    break
             except DownloadError as exc:
                 failures.append(str(exc))
                 blocked = "403" in str(exc) or "429" in str(exc)
+                if blocked:
+                    log("YouTube blocked search requests; pausing searches for 30 seconds.")
+                    time.sleep(30)
                 if blocked and entries_by_id:
                     break
                 if blocked and len(failures) >= 2:
                     break
-                if blocked:
-                    time.sleep(5)
                 continue
 
     entries = list(entries_by_id.values())
@@ -1876,11 +1947,12 @@ def download_track(
             "format": "bestaudio/best",
             "outtmpl": output_template(output_dir, track, width, ascii_names),
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
             "noplaylist": True,
             "retries": 5,
             "fragment_retries": 5,
             "concurrent_fragment_downloads": 4,
+            **youtube_runtime_options(),
             "ffmpeg_location": ffmpeg_location,
             "postprocessors": [
                 {
